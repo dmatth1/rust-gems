@@ -115,6 +115,31 @@ mod tests {
         }
     }
 
+    /// Guards the single-token and greedy fast paths in `count` / `encode_via_backtracking`
+    /// against the exact encoders. `count` has its own fast-path implementation separate
+    /// from `encode_via_backtracking`, so we also assert the two agree.
+    #[test]
+    fn test_fast_paths_match_backtracking() {
+        let bpe = &cl100k_base().bpe;
+        // Single-token fast path: each individual vocab token must encode to itself and
+        // count as 1 (a sweep across the vocabulary exercises the path densely).
+        for id in (0..bpe.num_tokens() as u32).step_by(997) {
+            let bytes = bpe.token_bytes(id).to_vec();
+            assert_eq!(bpe.encode_via_backtracking(&bytes), vec![id]);
+            assert_eq!(bpe.count(&bytes), 1);
+        }
+        // Greedy fast path + backtracking fallback on random inputs of varied sizes: the
+        // greedy output must match the bitfield encoder, and `count` must match its length.
+        for bytes in [1, 10, 100, 1000, 10000] {
+            for _ in 0..8 {
+                let input = create_test_bytes(bpe, bytes);
+                let encoded = bpe.encode_via_backtracking(&input);
+                assert_eq!(encoded, bpe.encode_via_bitfield(&input));
+                assert_eq!(bpe.count(&input), encoded.len());
+            }
+        }
+    }
+
     #[test]
     fn test_interval_count() {
         let bpe = &cl100k_base().bpe;

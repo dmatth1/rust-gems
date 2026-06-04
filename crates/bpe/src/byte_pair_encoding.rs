@@ -411,6 +411,10 @@ impl BytePairEncoding {
 
     /// Counts the number tokens produced when encoding the text.
     pub fn count(&self, text: &[u8]) -> usize {
+        let mut count = 0;
+        if self.greedy_encode(text, |_| count += 1) {
+            return count;
+        }
         let mut enc = BacktrackEncoder::new(self, text);
         while enc.step().is_some() {}
         enc.count()
@@ -452,9 +456,48 @@ impl BytePairEncoding {
     }
 
     pub fn encode_via_backtracking(&self, text: &[u8]) -> Vec<u32> {
-        let mut enc = BacktrackEncoder::new(self, text);
+        let mut tokens = Vec::with_capacity(text.len() / 3);
+        if self.greedy_encode(text, |token| tokens.push(token)) {
+            return tokens;
+        }
+        // Greedy diverged from BPE: redo exactly with the backtracking encoder.
+        let mut enc = BacktrackEncoder::with_capacity(self, text, text.len() / 3);
         while enc.step().is_some() {}
         enc.into_tokens()
+    }
+
+    /// Greedy longest-match encoding, emitting each token to `emit` and validating each
+    /// adjacent pair with the merge-reversal check. Returns `true` iff the greedy
+    /// tokenization equals the exact BPE tokenization (the common case, including any
+    /// single-token input). Returns `false` as soon as a pair is invalid — at which point
+    /// the emitted tokens are meaningless and the caller must restart with
+    /// [`BacktrackEncoder`]. Avoids that encoder's per-call bitfield allocation on the
+    /// common path.
+    ///
+    /// Why this is exact: [`BacktrackEncoder`] starts with an all-ones bitfield, so its
+    /// forward pass accepts the longest match whenever the validity check passes — byte
+    /// for byte what this loop does. It only pops (backtracks) when a check fails, which
+    /// is exactly the condition on which we bail. So when this returns `true`, no pop
+    /// would ever have happened and the outputs are identical.
+    #[inline]
+    fn greedy_encode(&self, text: &[u8], mut emit: impl FnMut(u32)) -> bool {
+        let Some(mut last) = self.next_match(text) else {
+            return true;
+        };
+        emit(last);
+        let mut pos = self.token_len(last);
+        while pos < text.len() {
+            let Some(token) = self.next_match(&text[pos..]) else {
+                break;
+            };
+            if !self.is_valid_token_pair(last, token) {
+                return false;
+            }
+            emit(token);
+            pos += self.token_len(token);
+            last = token;
+        }
+        true
     }
 
     fn encode_into_bitfield(&self, bytes: &[u8]) -> (BitField, usize) {
